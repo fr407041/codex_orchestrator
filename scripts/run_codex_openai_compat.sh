@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL_NAME="${MODEL_NAME:-qwen3:4b}"
-BASE_URL="${OPENAI_BASE_URL:-http://127.0.0.1:11434/v1}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [[ -z "${OPENAI_BASE_URL:-}" || -z "${MODEL_NAME:-}" ]]; then
+  source "${SCRIPT_DIR}/resolve_model_env.sh"
+fi
+
+MODEL_NAME="${MODEL_NAME}"
+BASE_URL="${OPENAI_BASE_URL}"
 CODEX_BIN="${CODEX_BIN:-}"
 
 if [[ -z "$CODEX_BIN" ]]; then
