@@ -1,65 +1,53 @@
-# Codex Server Playbook
+# Codex Orchestrator
 
-這份是 Linux server 內部使用版，主路徑改成：
+這份 playbook 以 `master codex -> worker codex CLI` 為主，目標是讓較小的開源 LLM 也能先拆任務、再分批執行，降低單次讀太多檔案而造成 token overflow 的機率。
 
-- `master codex` 用開源 / 本機 LLM 做規劃與拆 job
-- `worker codex cli` 也用開源 / 本機 LLM 執行小 job
-- `Claude Code + router` 保留為替代路徑，但不是這版主流程
+這次公開版本刻意聚焦在 server 內直接執行的流程：
 
-這份說明不依賴 Docker image，假設你已經能在 server 上直接執行 `codex`，且本機或同機房已有 OpenAI-compatible 開源模型服務。
+- `master codex` 負責盤點 scope、規劃小 job、偵測 overflow 與 replan
+- `worker codex CLI` 負責只看指定少量檔案並回傳結果
+- 預設接 OpenAI-compatible endpoint，例如 Ollama 或 LM Studio
 
-## 核心概念
+這個 repository 不把 Docker image、benchmark 輸出、暫存結果、`.pytest_cache`、`__pycache__` 當成主要發布內容。
 
-1. `Codex master` 只做窄範圍 inventory、規劃、拆 job。
-2. `Codex worker` 每次只吃極少數檔案，避免大 prompt 直接打爆 context。
-3. `worker` 若偵測上下文壓力，回傳 `OVERFLOW_DETECTED`。
-4. `worker` 若缺額外檔案，回傳 `NEEDS_REPLAN`。
-5. edit 任務一定驗證實際檔案變更與測試結果，避免假成功。
+## 核心檔案
 
-## 主要檔案
-
-### Codex-only 主流程
-
-- `scripts/run_codex_guarded.sh`
-- `scripts/run_codex_openai_compat.sh`
 - `scripts/orchestrate_codex_to_codex.sh`
 - `scripts/worker_codex_cli.sh`
-- `scripts/evaluate_codex_orchestration.sh`
-- `scripts/evaluate_codex_worker_edit.sh`
-- `scripts/setup_ubuntu2204_codex_master_worker.sh`
-- `scripts/smoke_test_ubuntu2204_codex_master_worker.sh`
+- `scripts/worker_codex_managed_single_file.sh`
+- `scripts/run_codex_guarded.sh`
+- `scripts/run_codex_openai_compat.sh`
+- `scripts/run_codex_oss.sh`
 - `scripts/test_llm_endpoint.sh`
-- `profiles/qwen-small-safe.env.example`
+- `scripts/detect_openai_compat_model.sh`
+- `scripts/resolve_model_env.sh`
 - `prompts/master_codex_bootstrap.zh-TW.md`
-- `ubuntu22.04/INSTALL.zh-TW.md`
-- `ubuntu22.04/Dockerfile`
-- `ubuntu22.04/docker-compose.yml`
-- `ubuntu22.04/README.en.md`
-- `ubuntu22.04/CODEX_BOOTSTRAP.en.md`
-- `ubuntu22.04/VERIFIED_RESULTS_2026-06-24.zh-TW.md`
-- `ubuntu22.04/MODEL_ROLE_MATRIX_2026-06-24.zh-TW.md`
+- `profiles/qwen-small-safe.env.example`
 - `codex-config/config.toml.example`
 - `codex-config/config.oss.example.toml`
 - `examples/hello-python/`
-- `scripts/benchmark_model_roles.sh`
-- `scripts/worker_codex_managed_single_file.sh`
-- `scripts/evaluate_codex_managed_worker_edit.sh`
-- `scripts/evaluate_codex_managed_orchestration.sh`
 
-### 保留的 Claude/router 替代流程
+## 適用情境
 
-- `router-config.json`
-- `run-claude.sh`
-- `run-codex.sh`
-- `start-ccr.sh`
-- `scripts/orchestrate_codex_to_claude.sh`
-- `scripts/worker_claude_router.sh`
-- `scripts/evaluate_orchestration.sh`
-- `scripts/evaluate_worker_edit.sh`
+當你直接讓單一 Codex CLI 讀整個 repo，常遇到這類問題時，這套流程比較有幫助：
 
-## 先備環境
+- output token 要求過大
+- 小模型先噴長 reasoning，真正可用內容很少
+- 單次 scope 太廣，worker 還沒開始做事就先爆 context
+- 子代理也因為被派太大的 job 而一起 overflow
 
-server 內建議有：
+## 流程概念
+
+1. `master codex` 先建立檔案 inventory，但只抽樣小範圍給 planner。
+2. planner 最多只切出少量 job，每個 job 最多碰少數檔案。
+3. 若任務明確指定單一檔案，會走 deterministic single-file managed edit，避免又被自由規劃擴大。
+4. `worker codex CLI` 只處理自己的 job。
+5. 若 worker 回報 `OVERFLOW_DETECTED`，master 會把 job 再拆細。
+6. 若 worker 沒有真正改到檔案卻聲稱成功，會被標成 false success block，避免主代理誤判完成。
+
+## 先決條件
+
+server 端請先有：
 
 - `node`
 - `npm`
@@ -68,154 +56,103 @@ server 內建議有：
 - `curl`
 - `codex`
 
-若你還要保留 Claude/router 備援路徑，再另外準備：
-
-- `claude`
-- `ccr`
-
-Codex CLI 安裝範例：
+安裝 Codex CLI：
 
 ```bash
 npm install -g @openai/codex
 ```
 
-如果也要備用 Claude/router：
+## 模型端點
+
+支援 OpenAI-compatible API，常見例子：
+
+- Ollama: `http://127.0.0.1:11434/v1`
+- LM Studio: `http://127.0.0.1:1234/v1`
+
+如果不想手動指定模型，可讓腳本自動偵測：
 
 ```bash
-npm install -g @anthropic-ai/claude-code
-npm install -g @musistudio/claude-code-router
+bash ./scripts/test_llm_endpoint.sh auto
+source ./scripts/resolve_model_env.sh auto
+echo "$OPENAI_BASE_URL"
+echo "$MODEL_NAME"
 ```
 
-## 建議放置路徑
+## 快速開始
 
-假設這份配置放在：
+先測試 endpoint：
 
 ```bash
-/srv/codex-claude-server-playbook
+bash ./scripts/test_llm_endpoint.sh auto
 ```
 
-下面命令都以此為例。
-
-## 開源模型服務假設
-
-預設優先使用本機 Ollama OpenAI-compatible API：
-
-- `http://127.0.0.1:11434/v1`
-
-如果你用 LM Studio，可改成：
-
-- `http://127.0.0.1:1234/v1`
-
-若模型名稱不是 `qwen3:4b`，請自行用環境變數覆蓋：
+啟動互動式 Codex CLI：
 
 ```bash
-export MODEL_NAME=qwen2.5-coder:7b
-export OPENAI_BASE_URL=http://127.0.0.1:11434/v1
-export OPENAI_API_KEY=dummy-key
-```
-
-如果你是 Ubuntu 22.04 image / container 內安裝，請先看：
-
-- `ubuntu22.04/INSTALL.zh-TW.md`
-
-## 啟動與驗證
-
-### 1. 先測模型 endpoint
-
-```bash
-cd /srv/codex-claude-server-playbook
-bash ./scripts/test_llm_endpoint.sh ollama
-```
-
-若是 Ubuntu 22.04 image 內從零安裝，可先跑：
-
-```bash
-cd /opt/codex-claude-server-playbook
-bash ./scripts/setup_ubuntu2204_codex_master_worker.sh /opt/codex-claude-server-playbook
-source ./profiles/qwen-small-safe.env.example
-bash ./scripts/smoke_test_ubuntu2204_codex_master_worker.sh /opt/codex-claude-server-playbook
-```
-
-### 2. 啟動 Codex CLI
-
-```bash
-cd /srv/codex-claude-server-playbook
 bash ./scripts/run_codex_openai_compat.sh
 ```
 
-### 3. 用 guarded 模式做窄範圍規劃
+執行 guarded 模式：
 
 ```bash
-cd /srv/codex-claude-server-playbook
 bash ./scripts/run_codex_guarded.sh "Inspect src and identify the smallest safe next code task"
 ```
 
-## Master Codex -> Worker Codex
-
-### 自動拆 job 並執行 worker
+讓 master 派 worker：
 
 ```bash
-cd /srv/codex-claude-server-playbook
-bash ./scripts/orchestrate_codex_to_codex.sh "Inspect src and identify the smallest safe next code task" /srv/myrepo
+bash ./scripts/orchestrate_codex_to_codex.sh \
+  "Inspect the repo, identify the smallest safe next code task, and avoid broad reads." \
+  /path/to/repo
 ```
 
-### 單獨執行一個 worker job
+## 驗證方式
+
+小型 repo 驗證：
 
 ```bash
-cd /srv/codex-claude-server-playbook
-bash ./scripts/worker_codex_cli.sh /path/to/job.json
-```
-
-## 如何降低 token overflow
-
-1. master 只先建立 inventory，不直接讓模型掃整個資料夾。
-2. planner 每個 job 預設最多只分到 3 個檔案。
-3. worker prompt 明確禁止長 reasoning 與大範圍擴張。
-4. worker overflow 後，orchestrator 會自動把多檔 job 再切成單檔 retry。
-5. `summary.json` 會量化：
-   - `avg_files_per_job`
-   - `max_files_in_job`
-   - `breadth_reduction_percent`
-   - `workers_overflowed`
-   - `overflow_retries`
-   - `workers_need_replan`
-   - `workers_false_success_blocked`
-
-## Smoke Test
-
-### 規劃 + orchestration 評估
-
-```bash
-cd /srv/codex-claude-server-playbook
 bash ./scripts/evaluate_codex_orchestration.sh
-```
-
-### worker edit 評估
-
-```bash
-cd /srv/codex-claude-server-playbook
 bash ./scripts/evaluate_codex_worker_edit.sh
 ```
 
-### 舊版 Claude/router 評估
+強制單檔 managed edit 驗證：
 
 ```bash
-cd /srv/codex-claude-server-playbook
-bash ./scripts/evaluate_orchestration.sh
-bash ./scripts/evaluate_worker_edit.sh
+bash ./scripts/evaluate_codex_managed_orchestration.sh
+bash ./scripts/evaluate_codex_managed_worker_edit.sh
 ```
 
-## 給公司內部 follow 的建議順序
+多輪穩定性驗證：
 
-1. 先確認本機開源模型 API 可用。
-2. 先跑 `evaluate_codex_orchestration.sh`，看拆 job 與 overflow 指標。
-3. 再跑 `evaluate_codex_worker_edit.sh`，看 worker 是否真的能改檔與通過 pytest。
-4. 最後才套到真實大型 repo。
-5. 若 Codex-only 成效不夠，再對照 Claude/router 備援版。
+```bash
+bash ./scripts/evaluate_codex_multi_round.sh 3
+```
 
-## 風險提醒
+重點觀察 `summary.json` 內這些欄位：
 
-1. master 和 worker 都改用開源模型後，成本更低，但規劃品質可能比商用大模型不穩。
-2. 若 `workers_overflowed` 很高，先縮小 `ORCH_MAX_FILES_PER_JOB`，再換更大模型。
-3. 若 `workers_need_replan` 很高，表示 master 拆 job 仍太粗。
-4. 這套流程是降低單次 context 壓力，不保證所有 repo 都能一次成功。
+- `workers_overflowed`
+- `workers_failed`
+- `workers_need_replan`
+- `workers_false_success_blocked`
+- `workers_with_verified_changes`
+- `max_files_in_job`
+
+## 參考策略
+
+如果你要把這套思路交給公司內部 Codex follow，可先要求它遵守這幾條：
+
+- 先縮 scope，再規劃
+- 每個 worker job 最多只看極少數檔案
+- 先做 investigation job，再做 edit job
+- 遇到 overflow 就重切 job，不要硬撐
+- 沒有 verified file change 不算成功
+
+對應的啟動提示可直接參考：
+
+- `prompts/master_codex_bootstrap.zh-TW.md`
+
+## 安全說明
+
+- 這份公開版本只放 placeholder key，例如 `dummy-key`
+- 不應提交真實 API key、帳密、session、token
+- 發布前可再檢查 `SAFE_PUBLISHING.md`
