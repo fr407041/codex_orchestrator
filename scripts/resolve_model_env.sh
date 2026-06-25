@@ -37,6 +37,12 @@ if [[ -z "${API_TIMEOUT_MS:-}" ]]; then
   export API_TIMEOUT_MS=600000
 fi
 
+if [[ "${model_lower}" == *"coder"* || "${model_lower}" == *"code"* ]]; then
+  if [[ -z "${ORCH_MAX_FILES_PER_JOB:-}" ]]; then
+    export ORCH_MAX_FILES_PER_JOB=2
+  fi
+fi
+
 if [[ "${model_lower}" == *"3b"* || "${model_lower}" == *"4b"* ]]; then
   if (( ORCH_MAX_FILES_PER_JOB > 1 )); then
     export ORCH_MAX_FILES_PER_JOB=1

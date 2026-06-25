@@ -12,7 +12,7 @@ BASE_URL="${OPENAI_BASE_URL}"
 CODEX_BIN="${CODEX_BIN:-}"
 
 if [[ -z "$CODEX_BIN" ]]; then
-  if command -v codex > /dev/null 2>&1; then
+  if command -v codex >/dev/null 2>&1; then
     CODEX_BIN="$(command -v codex)"
   elif [[ -x /usr/local/bin/run-codex ]]; then
     CODEX_BIN="/usr/local/bin/run-codex"
